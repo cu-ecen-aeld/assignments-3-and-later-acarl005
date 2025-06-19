@@ -86,18 +86,9 @@ ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
 
-CROSS_COMPILE_ASSETS="$HOME/cross"
-if [ ! -d "$CROSS_COMPILE_ASSETS" ]; then
-    mkdir -p "$CROSS_COMPILE_ASSETS"
-    cd /tmp
-    wget 'https://developer.arm.com/-/media/Files/downloads/gnu/13.3.rel1/binrel/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz'
-    tar xJf arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz -C "$CROSS_COMPILE_ASSETS" 
-    cd -
-fi
-ARM_DIR="$CROSS_COMPILE_ASSETS/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu"
-
-cp "$ARM_DIR/libc/lib/ld-linux-aarch64.so.1" lib
-cp "$ARM_DIR/libc/lib64/"{libm.so.6,libresolv.so.2,libc.so.6} lib64
+SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
+cp "$SYSROOT/lib/ld-linux-aarch64.so.1" lib
+cp "$SYSROOT/lib64/"{libm.so.6,libresolv.so.2,libc.so.6} lib64
 
 sudo mknod -m 666 dev/null c 1 3
 
