@@ -140,7 +140,7 @@ int main(int argc, char *argv[]) {
         perror("bind");
         return -1;
     }
-    status = listen(sock_fd, 0);
+    status = listen(sock_fd, 50);
     if (status == -1) {
         perror("listen");
         return -1;
