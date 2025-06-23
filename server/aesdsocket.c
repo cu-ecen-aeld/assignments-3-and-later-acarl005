@@ -1,29 +1,50 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #define BUF_LEN 4096
+#define DATAFILE_PATH "/var/tmp/aesdsocketdata"
 
-int sock_fd = -1;
+static bool should_exit = false;
+static int datafile_fd = -1;
+static pthread_mutex_t datafile_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int sock_fd = -1;
 
-static void handler(int signum) {
+struct list_entry {
+    pthread_t tid;
+    bool complete;
+    STAILQ_ENTRY(list_entry) entries;
+};
+
+STAILQ_HEAD(list_head, list_entry);
+
+struct client_thread_args {
+    int conn_fd;
+    struct list_entry *entry;
+};
+
+static void signal_handler(int signum) {
     if (signum == SIGINT) {
+        should_exit = true;
         if (sock_fd != -1) {
             shutdown(sock_fd, SHUT_RDWR);
             close(sock_fd);
         }
-        exit(128 + signum);
     }
 }
 
+// Reads from the client in a loop until "\n" char is received. Heap-allocated
+// memory will grow indefinitely until then.
 ssize_t read_line(int conn_fd, char **data_out) {
     char *data = NULL;
     size_t capacity = 0;
@@ -33,7 +54,6 @@ ssize_t read_line(int conn_fd, char **data_out) {
     while (1) {
         capacity += BUF_LEN;
         data = realloc(data, capacity);
-        printf("data: %p\n", (void *)data);
         if (data == NULL) {
             perror("realloc");
             return -1;
@@ -62,6 +82,7 @@ ssize_t read_line(int conn_fd, char **data_out) {
     }
 }
 
+// Read bytes from `in_fd` until EOF and write them to `out_fd`.
 int stream_data(int in_fd, int out_fd) {
     while (1) {
         char data[BUF_LEN];
@@ -81,11 +102,111 @@ int stream_data(int in_fd, int out_fd) {
     }
 }
 
+void *handle_client(void *arg) {
+    struct client_thread_args *thread_args = (struct client_thread_args *)arg;
+
+    char *data;
+    ssize_t data_len = read_line(thread_args->conn_fd, &data);
+    if (data_len == -1) {
+        return arg;
+    }
+
+    int status = pthread_mutex_lock(&datafile_mutex);
+    if (status != 0) {
+        perror("pthread_mutex_lock");
+        goto cleanup1;
+    }
+
+    ssize_t bytes_written = write(datafile_fd, data, data_len);
+    if (bytes_written == -1) {
+        perror("write");
+        goto cleanup2;
+    }
+
+    int data_read_fd = open(DATAFILE_PATH, O_RDONLY);
+    if (data_read_fd == -1) {
+        perror("open");
+        goto cleanup2;
+    }
+    status = stream_data(data_read_fd, thread_args->conn_fd);
+    if (status == -1) {
+        goto cleanup2;
+    }
+
+    status = close(thread_args->conn_fd);
+    if (status == -1) {
+        perror("close");
+        goto cleanup2;
+    }
+
+cleanup2:
+    status = pthread_mutex_unlock(&datafile_mutex);
+    if (status != 0) {
+        perror("pthread_mutex_unlock");
+    }
+cleanup1:
+    free(data);
+    thread_args->entry->complete = true;
+    return arg;
+}
+
+// Every 10 seconds, write a RFC 2822 timestamp to the data file.
+void *timed_writer(void *arg) {
+    sleep(10);
+    time_t now = time(NULL);
+    struct tm local_tm;
+    localtime_r(&now, &local_tm);
+
+    char t_buf[128];
+    size_t t_len =
+        strftime(t_buf, sizeof(t_buf), "%a, %d %b %Y %H:%M:%S %z", &local_tm);
+    if (!t_len) {
+        perror("strftime");
+        return NULL;
+    }
+
+    int status = pthread_mutex_lock(&datafile_mutex);
+    if (status != 0) {
+        perror("pthread_mutex_lock");
+        return NULL;
+    }
+
+    ssize_t bytes_written =
+        write(datafile_fd, "timestamp:", sizeof("timestamp:"));
+    if (bytes_written == -1) {
+        perror("write");
+        goto cleanup;
+    }
+    bytes_written = write(datafile_fd, t_buf, t_len);
+    if (bytes_written == -1) {
+        perror("write");
+        goto cleanup;
+    }
+    bytes_written = write(datafile_fd, "\n", 1);
+    if (bytes_written == -1) {
+        perror("write");
+        goto cleanup;
+    }
+
+    status = pthread_mutex_unlock(&datafile_mutex);
+    if (status != 0) {
+        perror("pthread_mutex_unlock");
+    }
+    return timed_writer(NULL);
+
+cleanup:
+    status = pthread_mutex_unlock(&datafile_mutex);
+    if (status != 0) {
+        perror("pthread_mutex_unlock");
+    }
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     struct sigaction sa;
-    sa.sa_handler = handler;
+    sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
+    sa.sa_flags = 0;
     int status = sigaction(SIGINT, &sa, NULL);
     if (status == -1) {
         perror("sigaction");
@@ -146,57 +267,90 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    int data_fd =
-        open("/var/tmp/aesdsocketdata", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (data_fd == -1) {
+    datafile_fd = open(DATAFILE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (datafile_fd == -1) {
         perror("open");
         return -1;
     }
 
     freeaddrinfo(servinfo);
 
-    while (1) {
+    pthread_t timer_thread;
+    status = pthread_create(&timer_thread, NULL, timed_writer, NULL);
+    if (status != 0) {
+        perror("pthread_create");
+        return -1;
+    }
+
+    struct list_head head = STAILQ_HEAD_INITIALIZER(head);
+    STAILQ_INIT(&head);
+
+    while (!should_exit) {
         struct sockaddr client_addr;
         socklen_t client_addr_len = sizeof(struct sockaddr);
         int conn_fd = accept(sock_fd, &client_addr, &client_addr_len);
         if (conn_fd == -1) {
             perror("accept");
-            return -1;
+            break;
         }
 
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sa_data), ip_str, sizeof(ip_str));
         printf("Accepted connection from %s\n", ip_str);
 
-        char *data;
-        ssize_t data_len = read_line(conn_fd, &data);
-        if (data_len == -1) {
-            return -1;
+        struct list_entry *entry = malloc(sizeof(struct list_entry));
+        if (!entry) {
+            perror("malloc");
         }
-        printf("got data: %s\n", data);
+        entry->complete = false;
+        struct client_thread_args *thread_args =
+            malloc(sizeof(struct client_thread_args));
+        thread_args->entry = entry;
+        thread_args->conn_fd = conn_fd;
+        status = pthread_create(&entry->tid, NULL, handle_client, thread_args);
+        if (status != 0) {
+            perror("pthread_create");
+        }
+        STAILQ_INSERT_TAIL(&head, entry, entries);
 
-        ssize_t bytes_written = write(data_fd, data, data_len);
-        if (bytes_written == -1) {
-            perror("write");
-            return -1;
-        }
-        free(data);
-
-        int data_read_fd = open("/var/tmp/aesdsocketdata", O_RDONLY);
-        if (data_read_fd == -1) {
-            perror("open");
-            return -1;
-        }
-        int status = stream_data(data_read_fd, conn_fd);
-        if (status == -1) {
-            return -1;
-        }
-
-        status = close(conn_fd);
-        if (status == -1) {
-            perror("close");
-            return -1;
-        }
+        // This loop cleans up any completed threads. The looping is weird b/c
+        // removing an element mid-loop invalidates the iterator. So, we break
+        // the inner loop and start it over if we remove anything.
+        bool thread_joined;
+        do {
+            thread_joined = false;
+            struct list_entry *node;
+            STAILQ_FOREACH(node, &head, entries) {
+                if (node->complete) {
+                    struct client_thread_args *thread_args = NULL;
+                    int thread_status =
+                        pthread_join(node->tid, (void *)thread_args);
+                    if (thread_status != 0) {
+                        perror("pthread_join");
+                    }
+                    thread_joined = true;
+                    STAILQ_REMOVE(&head, node, list_entry, entries);
+                    free(node);
+                    free(thread_args);
+                    break;
+                }
+            }
+        } while (thread_joined);
     }
+
+    // Final cleanup of any remaining threads.
+    struct list_entry *node;
+    while (!STAILQ_EMPTY(&head)) {
+        node = STAILQ_FIRST(&head);
+        STAILQ_REMOVE_HEAD(&head, entries);
+        struct client_thread_args *thread_args = NULL;
+        int thread_status = pthread_join(node->tid, (void *)thread_args);
+        if (thread_status != 0) {
+            perror("pthread_join");
+        }
+        free(node);
+        free(thread_args);
+    }
+
     return 0;
 }
