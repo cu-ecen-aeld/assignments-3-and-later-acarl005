@@ -1,4 +1,4 @@
-CFLAGS = -g -Wall -Werror
+CFLAGS += -g -Wall -Werror
 CROSS_COMPILE ?=
 CC := $(CROSS_COMPILE)gcc
 
@@ -9,7 +9,8 @@ endif
 all: aesdsocket
 
 aesdsocket: aesdsocket.c
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:
 	rm -f aesdsocket
+
