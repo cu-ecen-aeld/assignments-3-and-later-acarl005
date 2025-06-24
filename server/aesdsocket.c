@@ -19,6 +19,7 @@ static bool should_exit = false;
 static int datafile_fd = -1;
 static pthread_mutex_t datafile_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int sock_fd = -1;
+static bool timer_started = false;
 
 struct list_entry {
     pthread_t tid;
@@ -202,6 +203,25 @@ cleanup:
     return NULL;
 }
 
+int start_timer_thread() {
+    if (timer_started) {
+        return 0;
+    }
+    pthread_t tid;
+    int status = pthread_create(&tid, NULL, timed_writer, NULL);
+    if (status != 0) {
+        perror("pthread_create");
+        return -1;
+    }
+    status = pthread_detach(tid);
+    if (status != 0) {
+        perror("pthread_detach");
+        return -1;
+    }
+    timer_started = true;
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     struct sigaction sa;
     sa.sa_handler = signal_handler;
@@ -275,13 +295,6 @@ int main(int argc, char *argv[]) {
 
     freeaddrinfo(servinfo);
 
-    pthread_t timer_thread;
-    status = pthread_create(&timer_thread, NULL, timed_writer, NULL);
-    if (status != 0) {
-        perror("pthread_create");
-        return -1;
-    }
-
     struct list_head head = STAILQ_HEAD_INITIALIZER(head);
     STAILQ_INIT(&head);
 
@@ -293,6 +306,12 @@ int main(int argc, char *argv[]) {
             perror("accept");
             break;
         }
+
+        // Wait until the first connection is accepted before starting the
+        // timestamp writer thread. I don't recall this being specified in the
+        // assignment, but it is the behavior necessary to pass the full-test.sh
+        // in assignment 6 part 2.
+        start_timer_thread();
 
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sa_data), ip_str, sizeof(ip_str));
