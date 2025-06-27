@@ -83,16 +83,18 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     struct aesd_dev *aesd_device = (struct aesd_dev *)filp->private_data;
 
+    PDEBUG("taking lock");
     int status = mutex_lock_interruptible(&aesd_device->buffer_lock);
     if (status != 0) {
         retval = status;
         goto cleanup0;
     }
+    PDEBUG("lock taken");
     aesd_device->pending_write = (char*)krealloc(aesd_device->pending_write, aesd_device->pending_bytes + count, GFP_KERNEL);
     if (aesd_device->pending_write == NULL) {
         return retval;
     }
-    ulong bytes_not_written = copy_from_user(&(aesd_device->pending_write) + aesd_device->pending_bytes, buf, count);
+    ulong bytes_not_written = copy_from_user(aesd_device->pending_write + aesd_device->pending_bytes, buf, count);
     if (bytes_not_written != 0) {
         PDEBUG("copy_from_user failed");
         retval = -EFAULT;
@@ -100,6 +102,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     aesd_device->pending_bytes += count;
+    aesd_device->pending_write[aesd_device->pending_bytes] = 0;
+    PDEBUG("========== %s", aesd_device->pending_write);
 
     if (aesd_device->pending_write[aesd_device->pending_bytes - 1] == '\n') {
         struct aesd_buffer_entry entry;
