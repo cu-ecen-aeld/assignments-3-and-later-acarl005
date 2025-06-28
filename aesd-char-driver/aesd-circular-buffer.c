@@ -10,6 +10,7 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/module.h>
 #else
 #include <string.h>
 #endif
@@ -65,9 +66,10 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
     struct aesd_buffer_entry *in_offset = &(buffer->entry)[buffer->in_offs];
+    struct aesd_buffer_entry old_entry = *in_offset;
     *(in_offset) = *add_entry;
     buffer->in_offs++;
     buffer->in_offs = buffer->in_offs % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
@@ -76,7 +78,9 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     } else if (buffer->full) {
         buffer->out_offs++;
         buffer->out_offs = buffer->out_offs % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        return old_entry.buffptr;
     }
+    return NULL;
 }
 
 /**
@@ -85,4 +89,26 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 void aesd_circular_buffer_init(struct aesd_circular_buffer *buffer)
 {
     memset(buffer,0,sizeof(struct aesd_circular_buffer));
+}
+
+void aesd_circular_buffer_destroy(struct aesd_circular_buffer *buffer)
+{
+    bool wraps = buffer->in_offs < buffer->out_offs || (buffer->in_offs == buffer->out_offs && buffer->full);
+    uint8_t end;
+    if (wraps) {
+        end = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    } else {
+        end = buffer->in_offs;
+    }
+    for (uint8_t i = buffer->out_offs; i < end; i++) {
+        struct aesd_buffer_entry *entry = &buffer->entry[i];
+        kfree(entry->buffptr);
+    }
+    if (wraps) {
+        for (uint8_t i = 0; i < buffer->in_offs; i++) {
+            struct aesd_buffer_entry *entry = &buffer->entry[i];
+            kfree(entry->buffptr);
+        }
+    }
+    kfree(buffer);
 }

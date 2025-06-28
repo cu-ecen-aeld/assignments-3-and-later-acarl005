@@ -101,7 +101,10 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         entry.buffptr = aesd_device->pending_write;
         entry.size = aesd_device->pending_bytes;
         // TODO: clean up this memory leak
-        aesd_circular_buffer_add_entry(&aesd_device->buffer, &entry);
+        char *evicted = aesd_circular_buffer_add_entry(&aesd_device->buffer, &entry);
+        if (evicted != NULL) {
+            kfree(evicted);
+        }
         aesd_device->pending_bytes = 0;
         aesd_device->pending_write = NULL;
     }
