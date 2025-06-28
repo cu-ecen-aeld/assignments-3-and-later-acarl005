@@ -259,22 +259,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    datafile_fd = open(DATAFILE_PATH, O_WRONLY);
-    if (datafile_fd == -1) {
-        perror("open");
-        return -1;
-    }
-
-    struct stat st;
-    status = fstat(datafile_fd, &st);
-    if (status == -1) {
-        perror("fstat");
-        return -1;
-    }
-
-    // Assert that the datafile is a character device file.
-    assert(S_ISCHR(st.st_mode));
-
     freeaddrinfo(servinfo);
 
     struct list_head head = STAILQ_HEAD_INITIALIZER(head);
@@ -292,6 +276,24 @@ int main(int argc, char *argv[]) {
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sa_data), ip_str, sizeof(ip_str));
         printf("Accepted connection from %s\n", ip_str);
+
+        if (datafile_fd == -1) {
+            datafile_fd = open(DATAFILE_PATH, O_WRONLY);
+            if (datafile_fd == -1) {
+                perror("open");
+                return -1;
+            }
+
+            struct stat st;
+            status = fstat(datafile_fd, &st);
+            if (status == -1) {
+                perror("fstat");
+                return -1;
+            }
+
+            // Assert that the datafile is a character device file.
+            assert(S_ISCHR(st.st_mode));
+        }
 
         struct list_entry *entry = malloc(sizeof(struct list_entry));
         if (!entry) {
