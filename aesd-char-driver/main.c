@@ -38,9 +38,6 @@ int aesd_open(struct inode *inode, struct file *filp)
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
-    /**
-     * TODO: handle release
-     */
     return 0;
 }
 
@@ -58,13 +55,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     size_t entry_offset;
     struct aesd_buffer_entry *entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device->buffer, *f_pos, &entry_offset);
     if (entry == NULL) {
-        PDEBUG("nothing in buffer");
         retval = 0;
         goto cleanup1;
     }
     ulong bytes_not_written = copy_to_user(buf, entry->buffptr + entry_offset, entry->size - entry_offset);
     if (bytes_not_written != 0) {
-        PDEBUG("copy_to_user failed");
         retval = -EFAULT;
         goto cleanup1;
     }
@@ -83,32 +78,29 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     struct aesd_dev *aesd_device = (struct aesd_dev *)filp->private_data;
 
-    PDEBUG("taking lock");
     int status = mutex_lock_interruptible(&aesd_device->buffer_lock);
     if (status != 0) {
         retval = status;
         goto cleanup0;
     }
-    PDEBUG("lock taken");
     aesd_device->pending_write = (char*)krealloc(aesd_device->pending_write, aesd_device->pending_bytes + count, GFP_KERNEL);
     if (aesd_device->pending_write == NULL) {
         return retval;
     }
     ulong bytes_not_written = copy_from_user(aesd_device->pending_write + aesd_device->pending_bytes, buf, count);
     if (bytes_not_written != 0) {
-        PDEBUG("copy_from_user failed");
         retval = -EFAULT;
         goto cleanup1;
     }
 
     aesd_device->pending_bytes += count;
     aesd_device->pending_write[aesd_device->pending_bytes] = 0;
-    PDEBUG("========== %s", aesd_device->pending_write);
 
     if (aesd_device->pending_write[aesd_device->pending_bytes - 1] == '\n') {
         struct aesd_buffer_entry entry;
         entry.buffptr = aesd_device->pending_write;
         entry.size = aesd_device->pending_bytes;
+        // TODO: clean up this memory leak
         aesd_circular_buffer_add_entry(&aesd_device->buffer, &entry);
         aesd_device->pending_bytes = 0;
         aesd_device->pending_write = NULL;
