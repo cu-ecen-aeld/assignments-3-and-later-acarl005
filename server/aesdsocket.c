@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <assert.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <pthread.h>
@@ -9,15 +10,15 @@
 #include <string.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #define BUF_LEN 4096
-#define DATAFILE_PATH "/var/tmp/aesdsocketdata"
+#define DATAFILE_PATH "/dev/aesdchar"
 
 static bool should_exit = false;
 static int datafile_fd = -1;
-static pthread_mutex_t datafile_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int sock_fd = -1;
 static bool timer_started = false;
 
@@ -112,39 +113,27 @@ void *handle_client(void *arg) {
         return arg;
     }
 
-    int status = pthread_mutex_lock(&datafile_mutex);
-    if (status != 0) {
-        perror("pthread_mutex_lock");
-        goto cleanup1;
-    }
-
     ssize_t bytes_written = write(datafile_fd, data, data_len);
     if (bytes_written == -1) {
         perror("write");
-        goto cleanup2;
+        goto cleanup1;
     }
 
     int data_read_fd = open(DATAFILE_PATH, O_RDONLY);
     if (data_read_fd == -1) {
         perror("open");
-        goto cleanup2;
+        goto cleanup1;
     }
-    status = stream_data(data_read_fd, thread_args->conn_fd);
+    int status = stream_data(data_read_fd, thread_args->conn_fd);
     if (status == -1) {
-        goto cleanup2;
+        goto cleanup1;
     }
 
     status = close(thread_args->conn_fd);
     if (status == -1) {
         perror("close");
-        goto cleanup2;
     }
 
-cleanup2:
-    status = pthread_mutex_unlock(&datafile_mutex);
-    if (status != 0) {
-        perror("pthread_mutex_unlock");
-    }
 cleanup1:
     free(data);
     thread_args->entry->complete = true;
@@ -166,12 +155,6 @@ void *timed_writer(void *arg) {
         return NULL;
     }
 
-    int status = pthread_mutex_lock(&datafile_mutex);
-    if (status != 0) {
-        perror("pthread_mutex_lock");
-        return NULL;
-    }
-
     ssize_t bytes_written =
         write(datafile_fd, "timestamp:", sizeof("timestamp:"));
     if (bytes_written == -1) {
@@ -186,20 +169,9 @@ void *timed_writer(void *arg) {
     bytes_written = write(datafile_fd, "\n", 1);
     if (bytes_written == -1) {
         perror("write");
-        goto cleanup;
     }
-
-    status = pthread_mutex_unlock(&datafile_mutex);
-    if (status != 0) {
-        perror("pthread_mutex_unlock");
-    }
-    return timed_writer(NULL);
 
 cleanup:
-    status = pthread_mutex_unlock(&datafile_mutex);
-    if (status != 0) {
-        perror("pthread_mutex_unlock");
-    }
     return NULL;
 }
 
@@ -287,11 +259,21 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    datafile_fd = open(DATAFILE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    datafile_fd = open(DATAFILE_PATH, O_WRONLY);
     if (datafile_fd == -1) {
         perror("open");
         return -1;
     }
+
+    struct stat st;
+    status = fstat(datafile_fd, &st);
+    if (status == -1) {
+        perror("fstat");
+        return -1;
+    }
+
+    // Assert that the datafile is a character device file.
+    assert(S_ISCHR(st.st_mode));
 
     freeaddrinfo(servinfo);
 
@@ -306,12 +288,6 @@ int main(int argc, char *argv[]) {
             perror("accept");
             break;
         }
-
-        // Wait until the first connection is accepted before starting the
-        // timestamp writer thread. I don't recall this being specified in the
-        // assignment, but it is the behavior necessary to pass the full-test.sh
-        // in assignment 6 part 2.
-        start_timer_thread();
 
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sa_data), ip_str, sizeof(ip_str));
