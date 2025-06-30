@@ -1,4 +1,4 @@
-CFLAGS += -g -Wall -Werror
+CFLAGS += -g -Wall -Werror -I../aesd-char-driver
 CROSS_COMPILE ?=
 CC := $(CROSS_COMPILE)gcc
 

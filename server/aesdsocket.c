@@ -1,13 +1,16 @@
+#include "aesd_ioctl.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -113,10 +116,18 @@ void *handle_client(void *arg) {
         return arg;
     }
 
-    ssize_t bytes_written = write(datafile_fd, data, data_len);
-    if (bytes_written == -1) {
-        perror("write");
-        goto cleanup1;
+    const char *pattern = "^AESDCHAR_IOCSEEKTO:([0-9]+),([0-9]+)";
+    regex_t regex;
+    regmatch_t matches[3];
+    regcomp(&regex, pattern, REG_EXTENDED);
+
+    int reg_res = regexec(&regex, data, 3, matches, 0);
+    if (reg_res != 0) {
+        ssize_t bytes_written = write(datafile_fd, data, data_len);
+        if (bytes_written == -1) {
+            perror("write");
+            goto cleanup1;
+        }
     }
 
     int data_read_fd = open(DATAFILE_PATH, O_RDONLY);
@@ -124,6 +135,25 @@ void *handle_client(void *arg) {
         perror("open");
         goto cleanup1;
     }
+
+    if (reg_res == 0) {
+        struct aesd_seekto seekto;
+        char x[32] = {0};
+        int len1 = matches[1].rm_eo - matches[1].rm_so;
+        snprintf(x, len1 + 1, "%s", data + matches[1].rm_so);
+        seekto.write_cmd = atoi(x);
+
+        char y[32] = {0};
+        int len2 = matches[2].rm_eo - matches[2].rm_so;
+        snprintf(y, len2 + 1, "%s", data + matches[2].rm_so);
+        seekto.write_cmd_offset = atoi(y);
+
+        int status = ioctl(data_read_fd, AESDCHAR_IOCSEEKTO, &seekto);
+        if (status != 0) {
+            perror("ioctl");
+        }
+    }
+
     int status = stream_data(data_read_fd, thread_args->conn_fd);
     if (status == -1) {
         goto cleanup1;
@@ -136,6 +166,7 @@ void *handle_client(void *arg) {
 
 cleanup1:
     free(data);
+    regfree(&regex);
     thread_args->entry->complete = true;
     return arg;
 }
